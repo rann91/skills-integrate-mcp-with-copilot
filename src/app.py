@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
+import re
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
@@ -78,6 +79,19 @@ activities = {
 }
 
 
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _normalize_and_validate_email(email: str) -> str:
+    """Normalize an email to lowercase/stripped and validate its format."""
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Email is required")
+    if not EMAIL_PATTERN.match(normalized):
+        raise HTTPException(status_code=422, detail="Invalid email format")
+    return normalized
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
@@ -95,19 +109,29 @@ def signup_for_activity(activity_name: str, email: str):
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
+    normalized_email = _normalize_and_validate_email(email)
+
     # Get the specific activity
     activity = activities[activity_name]
 
-    # Validate student is not already signed up
-    if email in activity["participants"]:
+    # Enforce capacity limit
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Activity is full"
+        )
+
+    # Validate student is not already signed up (case-insensitive)
+    existing = {p.strip().lower() for p in activity["participants"]}
+    if normalized_email in existing:
         raise HTTPException(
             status_code=400,
             detail="Student is already signed up"
         )
 
     # Add student
-    activity["participants"].append(email)
-    return {"message": f"Signed up {email} for {activity_name}"}
+    activity["participants"].append(normalized_email)
+    return {"message": f"Signed up {normalized_email} for {activity_name}"}
 
 
 @app.delete("/activities/{activity_name}/unregister")
@@ -117,16 +141,27 @@ def unregister_from_activity(activity_name: str, email: str):
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
+    normalized_email = _normalize_and_validate_email(email)
+
     # Get the specific activity
     activity = activities[activity_name]
 
+    # Find the participant using case-insensitive comparison
+    participant_index = next(
+        (
+            i for i, p in enumerate(activity["participants"])
+            if p.strip().lower() == normalized_email
+        ),
+        None,
+    )
+
     # Validate student is signed up
-    if email not in activity["participants"]:
+    if participant_index is None:
         raise HTTPException(
             status_code=400,
             detail="Student is not signed up for this activity"
         )
 
     # Remove student
-    activity["participants"].remove(email)
-    return {"message": f"Unregistered {email} from {activity_name}"}
+    activity["participants"].pop(participant_index)
+    return {"message": f"Unregistered {normalized_email} from {activity_name}"}
